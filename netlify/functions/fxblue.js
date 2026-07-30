@@ -1,84 +1,80 @@
 export default async (req, context) => {
-  try {
-    const url = "https://www.fxblue.com/";
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html,application/xhtml+xml"
-      }
-    });
-    const html = await res.text();
+  const headersUA = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/json,*/*"
+  };
 
-    // Cerca il JSON di Next.js
-    const match = html.match(/<script id="__NEXT_DATA__"[^>]*>(.*?)<\/script>/s);
-    let dataStr = match? match[1] : "";
+  const urlsToTry = [
+    "https://www.fxblue.com/market-data/tools/sentiment",
+    "https://www.fxblue.com/tools/sentiment",
+    "https://www.fxblue.com/labs/sentiment",
+    "https://www.fxblue.com/"
+  ];
 
-    let retail = {};
+  let htmlAll = "";
+  let retail = {};
 
-    if (dataStr) {
-      try {
-        const json = JSON.parse(dataStr);
-        const fullStr = JSON.stringify(json);
-        // Cerca pattern tipo XAUUSD + long/short percent
-        const symbols = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "BTCUSD", "XAGUSD"];
-        for (const sym of symbols) {
-           const re = new RegExp(sym + `[^\\d]{0,100}(\\d{1,2}\\.?\\d?)%[^\\d]{0,30}(\\d{1,2}\\.?\\d?)%`, "i");
-           const m = fullStr.match(re);
-           if (m) {
-             retail[sym] = { long: parseFloat(m[1]), short: parseFloat(m[2]) };
-           }
-        }
-        // Fallback: cerca struttura sentiment
-        if (Object.keys(retail).length === 0) {
-           // cerca tutti i numeri vicini a longShort
-           const hits = [...fullStr.matchAll(/"symbol":"([A-Z]{6,10})".*?"long":(\d+\.?\d*).*?"short":(\d+\.?\d*)/gi)];
-           for (const h of hits) {
-             retail[h[1]] = { long: parseFloat(h[2]), short: parseFloat(h[3]) };
-           }
-        }
-      } catch(e){}
-    }
+  for (const u of urlsToTry) {
+    try {
+      const r = await fetch(u, { headers: headersUA });
+      const t = await r.text();
+      htmlAll = t;
 
-    // Se ancora vuoto, prova scraping vecchio HTML per compatibilità
-    if (Object.keys(retail).length === 0) {
-        const symRe = /XAUUSD|GOLD/gi;
-        if (html.includes("XAU")) {
-           // prova a estrarre percentuali dalla tabella sentiment
-           const perc = [...html.matchAll(/(\d{1,2}\.?\d*)\s*%\s*<\/[^>]*>\s*[^<]*\s*(\d{1,2}\.?\d*)\s*%/gi)];
-           if (perc[0]) retail["XAUUSD"] = { long: parseFloat(perc[0][1]), short: parseFloat(perc[0][2]) };
-        }
-    }
-
-    // SE ANCORA FALLISCE, usa fallback Myfxbook-style o demo LIVE ma con timestamp
-    if (Object.keys(retail).length === 0) {
-        // Ultimo tentativo: fetch diretto API non ufficiale FXBlue labs
+      // 1. Prova __NEXT_DATA__
+      const m = t.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+      if (m) {
         try {
-          const apiRes = await fetch("https://www.fxblue.com/labs/api/sentiment", { headers: {"User-Agent":"Mozilla/5.0"}});
-          if (apiRes.ok) {
-            const apiJson = await apiRes.json();
-            retail = apiJson;
+          const j = JSON.parse(m[1]);
+          const str = JSON.stringify(j);
+          // Cerca struttura sentiment dentro
+          const regex = /"symbol"\s*:\s*"([A-Z]{3,10})"[^}]{0,200}"(?:long|buyers|longPercent)"\s*:\s*(\d+\.?\d*)/gi;
+          let mm;
+          while ((mm = regex.exec(str))!== null) {
+            const sym = mm[1].replace("/", "");
+            const long = parseFloat(mm[2]);
+            if (long > 0 && long < 100) {
+              retail[sym] = { long: long, short: 100-long };
+            }
           }
+          // Pattern specifico XAU
+          if (Object.keys(retail).length > 0) break;
         } catch(e){}
-    }
+      }
 
-    if (Object.keys(retail).length === 0) {
-        return new Response(JSON.stringify({
-            error: "FXBlue markup ancora cambiato - mando fallback temporaneo",
-            hint: "Controlla __NEXT_DATA__",
-            retail: { "XAUUSD": { long: 58.2, short: 41.8, source: "fallback" } },
-            debug_html_len: html.length,
-            snippet: html.substring(0, 800),
-            timestamp: new Date().toISOString()
-        }), { status: 200, headers: {"Access-Control-Allow-Origin":"*","Content-Type":"application/json"} });
-    }
+      // 2. Cerca direttamente nel HTML le percentuali vicino a XAUUSD
+      const xauMatch = t.match(/XAUUSD[^%]{0,200}(\d{1,2}\.?\d*)\s*%\s*[^%]{0,200}(\d{1,2}\.?\d*)\s*%/is);
+      if (xauMatch) {
+        retail["XAUUSD"] = { long: parseFloat(xauMatch[1]), short: parseFloat(xauMatch[2]) };
+        break;
+      }
 
-    return new Response(JSON.stringify({
-        timestamp: new Date().toISOString(),
-        retail: retail,
-        source: "fxblue.com"
-    }), { headers: {"Access-Control-Allow-Origin":"*","Content-Type":"application/json"} });
-
-  } catch (err) {
-    return new Response(JSON.stringify({ error: err.message, stack: err.stack }), { status: 500, headers: {"Access-Control-Allow-Origin":"*"} });
+    } catch(e){}
   }
+
+  // FALLBACK FINALE: Myfxbook Community Outlook (stabile)
+  if (Object.keys(retail).length === 0) {
+    try {
+      const mf = await fetch("https://www.myfxbook.com/community/outlook", { headers: headersUA });
+      const mfHtml = await mf.text();
+      const xau = mfHtml.match(/XAUUSD[^%]{0,300}long[^0-9]{0,10}(\d{1,2})%[^0-9]{0,10}short[^0-9]{0,10}(\d{1,2})%/is) ||
+                  mfHtml.match(/GOLD[^%]{0,300}(\d{1,2})%\s*\|\s*(\d{1,2})%/i);
+      if (xau) {
+        retail["XAUUSD"] = { long: parseFloat(xau[1]), short: parseFloat(xau[2]), source: "myfxbook-fallback" };
+      }
+    } catch(e){}
+  }
+
+  return new Response(JSON.stringify({
+    timestamp: new Date().toISOString(),
+    retail: retail,
+    debug_len: htmlAll.length,
+    source: Object.keys(retail).length? "live" : "fallback",
+    note: Object.keys(retail).length? "ok" : "fxblue markup changed, used fallback logic"
+  }), {
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Content-Type": "application/json",
+      "Cache-Control": "no-cache"
+    }
+  });
 }
