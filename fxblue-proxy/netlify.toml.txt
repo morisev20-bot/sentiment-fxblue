@@ -1,0 +1,20 @@
+[build]
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+  # Node 18+ has native fetch - no deps needed
+
+[[headers]]
+  for = "/.netlify/functions/*"
+  [headers.values]
+    Access-Control-Allow-Origin = "*"
+    Access-Control-Allow-Headers = "Content-Type"
+    Access-Control-Allow-Methods = "GET, OPTIONS"
+    Cache-Control = "public, max-age=0, s-maxage=60"
+
+[[redirects]]
+  from = "/fxblue"
+  to = "/.netlify/functions/fxblue"
+  status = 200
+  force = true
